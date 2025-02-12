@@ -1,100 +1,88 @@
-# **Battery Arbitrage Optimization in DAM & RTM**
+# Battery Arbitrage Optimization with DAM and RTM
 
-## **Introduction**
-This project optimizes battery arbitrage in both the **Day-Ahead Market (DAM)** and **Real-Time Market (RTM)**. The model follows a **rolling-horizon multi-stage optimization**, continuously updating predictions and schedules as new information becomes available.
+## 1. Introduction
+This document describes the optimization model for battery arbitrage in both the **Day-Ahead Market (DAM)** and **Real-Time Market (RTM)** while accounting for battery degradation costs. The optimization is implemented as a **rolling-horizon, multi-stage MILP** (Mixed-Integer Linear Programming) model.
 
-## **Optimization Stages**
-1. **10:00 (D-1): DAM & RTM Pre-optimization**
-   - Predict **DAM** and **RTM** prices for the entire delivery day.
-   - Optimize bids for **DAM**, considering potential profits from **RTM**.
-   
-2. **13:30 (D-1): DAM Cleared Results Update**
-   - DAM prices and **accepted schedules** are now known.
-   - Update battery commitment and available flexibility for RTM.
-   - Update RTM price predictions and re-optimize.
+## 2. Mathematical Formulation
 
-3. **22:00 (D-1) Onward: RTM Optimization (Rolling Horizon)**
-   - **RTM market opens**: Optimize for the next 48 time blocks (00:30 to 24:00).
-   - Every **30 minutes**, update:
-     - RTM cleared schedules.
-     - Battery **state-of-charge (SoC)**.
-     - New RTM price predictions.
-   - Re-optimize for the next 30-minute window while considering future profits.
+### 2.1 Objective Function
+The goal is to **maximize total arbitrage profit** over the optimization horizon, considering both DAM and RTM profits while accounting for battery degradation costs.
 
-## **Mathematical Formulation**
-
-### **Objective Function**
-The goal is to maximize total arbitrage profit from both DAM and RTM:
-
+#### DAM Optimization (Runs at 10:00 Day-1)
 $$
-\max \sum_{t=0}^{95} \Delta t_{DAM} \left( P_t^{DAM} \cdot d_t - P_t^{DAM} \cdot c_t \right) + \sum_{t=0}^{47} \Delta t_{RTM} \left( P_t^{RTM} \cdot d_t - P_t^{RTM} \cdot c_t \right)
+\text{Profit}_{DAM} = \sum_{t=0}^{95} \Delta t \left( P^{DAM}_t \cdot d_t - P^{DAM}_t \cdot c_t \right) - \sum_{t=0}^{95} C_{deg}(c_t, d_t)
+$$
+
+#### RTM Optimization (Starts at 22:00 Day-1 and runs every 30 min)
+$$
+\text{Profit}_{RTM} = \sum_{t=0}^{47} \Delta t \left( P^{RTM}_t \cdot d_t - P^{RTM}_t \cdot c_t \right) - \sum_{t=0}^{47} C_{deg}(c_t, d_t)
 $$
 
 where:
-- \(P_t^{DAM}, P_t^{RTM}\) = Market prices in DAM and RTM.
-- \(c_t, d_t\) = Charging and discharging power (MW).
-- \(\Delta t_{DAM} = 15\) min, \(\Delta t_{RTM} = 30\) min.
+- **$P^{DAM}_t$**, **$P^{RTM}_t$** are market prices at time $t$
+- **$c_t$**, **$d_t$** are charging and discharging decisions
+- **$C_{deg}(c_t, d_t)$** is the degradation cost, computed using the **Rainflow algorithm**
 
-### **Constraints**
-1. **Battery State-of-Charge (SoC) Dynamics**
+### 2.2 Constraints
 
+#### 1. Battery Energy Balance
 $$
- x_{t+1} = x_t + \Delta t \cdot \left( \eta_c \cdot c_t - \frac{d_t}{\eta_d} \right)
+x_{t+1} = x_t + \eta_c c_t - \frac{d_t}{\eta_d}
 $$
+- **$x_t$**: State-of-Charge (SoC)
+- **$\eta_c, \eta_d$**: Charging and discharging efficiency
 
-2. **Charging/Discharging Limits**
-
+#### 2. Power Limits
 $$
-0 \leq c_t \leq y_t \cdot P_{ch}^{max}, \quad 10 \cdot y_t \leq c_t
+0 \leq c_t \leq P_{ch}^{max} \cdot y_t
 $$
-
 $$
-0 \leq d_t \leq z_t \cdot P_{dis}^{max}, \quad 10 \cdot z_t \leq d_t
-$$
-
-where \( y_t, z_t \) are binary variables indicating whether charging or discharging occurs.
-
-3. **Mutual Exclusivity**
-
-$$
-y_t + z_t \leq 1 \quad \forall t
+0 \leq d_t \leq P_{dis}^{max} \cdot z_t
 $$
 
-4. **Respect DAM Commitments**
-   - DAM schedules must be followed.
-   - RTM **cannot override DAM commitments**.
-   
-5. **RTM Rolling Horizon**
-   - Every 30 minutes, update:
-     - RTM price predictions.
-     - Cleared results from the previous RTM auction.
-     - Battery SoC.
+#### 3. Mutually Exclusive Charging/Discharging
+$$
+y_t + z_t \leq 1
+$$
 
-## **Code Structure**
+#### 4. DAM Schedules are Fixed Once Cleared
+After 13:30 on **Day-1**, DAM schedules are known and cannot be changed:
+$$
+c_t^{DAM} = c_t^{committed}, \quad d_t^{DAM} = d_t^{committed}
+$$
 
-### **1. Inputs & Forecasting Functions**
-- `forecast_DAM_nextday()`: Predicts DAM & RTM prices for day D.
-- `update_DAM_results()`: Updates DAM cleared results at 13:30.
-- `update_RTM_predictions()`: Updates rolling RTM forecasts every 30 min.
-- `update_RTM_results()`: Fetches RTM cleared schedules.
+#### 5. RTM Participation Constraints
+Battery flexibility for RTM depends on available capacity after honoring DAM commitments.
+$$
+c_t^{RTM} + c_t^{DAM} \leq P_{ch}^{max}, \quad d_t^{RTM} + d_t^{DAM} \leq P_{dis}^{max}
+$$
 
-### **2. DAM Optimization (10:00 D-1)**
-- Uses predicted DAM & RTM prices to optimize bids.
-- Ensures battery flexibility for potential RTM profits.
-- Solves Mixed Integer Linear Program (MILP).
+## 3. Battery Degradation Modeling (Rainflow Algorithm)
+To model degradation, we apply **Rainflow Counting** to extract battery cycles from SoC profiles. The degradation cost function is:
+$$
+C_{deg} = \sum_{j} \left( \alpha \cdot E_j \cdot f_j \right)
+$$
+where:
+- **$E_j$** is the energy throughput of cycle $j$
+- **$f_j$** is the cycle frequency
+- **$\alpha$** is the degradation cost per cycle
 
-### **3. RTM Rolling Optimization (From 22:00 D-1)**
-- At **each 30-min interval**:
-  - Fetch **RTM clearing results** and **update SoC**.
-  - Fetch **new RTM predictions**.
-  - Re-optimize the remaining period.
+## 4. Execution Timeline
+The optimization runs in sequential steps:
 
-## **Logging & Monitoring**
-- **Detailed logs for each RTM interval**, including:
-  - RTM cleared schedules.
-  - SoC updates.
-  - New RTM price forecasts.
-  - Updated bids for the next time block.
+| Time | Event |
+|------|-------|
+| 10:00 D-1 | DAM optimization using **forecasted DAM & RTM prices** |
+| 13:30 D-1 | DAM schedules are **finalized** & RTM forecasts updated |
+| 22:00 D-1 | RTM optimization for **next 24 hours** starts |
+| Every 30 min | RTM optimization updates based on **new forecasts & cleared bids** |
 
-## **Conclusion**
-This framework ensures **profit maximization across both DAM and RTM**, using real-time updates and a rolling-horizon strategy. The battery is dynamically scheduled while respecting DAM commitments and leveraging RTM flexibility.
+## 5. Plots & Visualization
+The final outputs include:
+- **DAM & RTM Price Trajectories**
+- **Battery SoC Profile**
+- **DAM & RTM Bidding Schedules**
+- **Cycle Depth Distribution (Rainflow Analysis)**
+
+---
+This framework ensures optimal battery participation in **both markets** while managing degradation costs effectively.
