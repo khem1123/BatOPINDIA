@@ -1,0 +1,102 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import pulp
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# -------------------------------
+# 1. Input Data and Parameters
+# -------------------------------
+np.random.seed(42)  # For reproducibility
+
+# Define the time horizon for DAM (96 blocks of 15 min) and RTM (48 blocks of 30 min)
+T_DAM = 96  # 15-minute blocks
+T_RTM = 48  # 30-minute blocks
+
+# Time step durations
+delta_t_DAM = 0.25  # 15 minutes in hours
+delta_t_RTM = 0.5   # 30 minutes in hours
+
+# Generate random DAM and RTM market prices (in $/MWh)
+def forecast_DAM_nextday():
+    return np.random.uniform(low=20, high=80, size=T_DAM)
+
+def forecast_RTM_nextday():
+    return np.random.uniform(low=25, high=85, size=T_RTM)
+
+dam_prices = forecast_DAM_nextday()
+rtm_prices_pred = forecast_RTM_nextday()
+
+# Battery parameters
+E_max = 1000.0      # Maximum energy capacity (MWh)
+P_ch_max = 250.0    # Maximum charging power (MW)
+P_dis_max = 250.0   # Maximum discharging power (MW)
+eta_c = 0.95        # Charging efficiency
+eta_d = 0.95        # Discharging efficiency
+
+# Initial state-of-charge (MWh)
+x0 = 500.0
+
+# -------------------------------
+# 2. DAM Optimization at 10:00
+# -------------------------------
+logging.info("Running DAM optimization at 10:00 using predicted DAM and RTM prices")
+prob_DAM = pulp.LpProblem("Battery_Arbitrage_DAM", pulp.LpMaximize)
+
+c_DAM = {t: pulp.LpVariable(f"c_DAM_{t}", lowBound=0, cat="Continuous") for t in range(T_DAM)}
+d_DAM = {t: pulp.LpVariable(f"d_DAM_{t}", lowBound=0, cat="Continuous") for t in range(T_DAM)}
+y_DAM = {t: pulp.LpVariable(f"y_DAM_{t}", cat="Binary") for t in range(T_DAM)}
+z_DAM = {t: pulp.LpVariable(f"z_DAM_{t}", cat="Binary") for t in range(T_DAM)}
+x_DAM = {t: pulp.LpVariable(f"x_DAM_{t}", lowBound=0, upBound=E_max, cat="Continuous") for t in range(T_DAM+1)}
+
+prob_DAM += pulp.lpSum([delta_t_DAM * (dam_prices[t] * d_DAM[t] - dam_prices[t] * c_DAM[t]) for t in range(T_DAM)])
+prob_DAM += (x_DAM[0] == x0), "Initial_SoC"
+for t in range(T_DAM):
+    prob_DAM += (x_DAM[t+1] == x_DAM[t] + delta_t_DAM * (eta_c * c_DAM[t] - (1/eta_d) * d_DAM[t]))
+prob_DAM.solve()
+logging.info("DAM optimization complete")
+
+dam_commitments = {t: (c_DAM[t].varValue, d_DAM[t].varValue) for t in range(T_DAM)}
+
+# -------------------------------
+# 3. DAM Clearing at 13:30
+# -------------------------------
+logging.info("Updating DAM prices and commitments at 13:30")
+dam_prices = np.random.uniform(low=20, high=80, size=T_DAM)  # Actual DAM prices known
+dam_cleared_commitments = dam_commitments  # Assuming all bids are cleared for simplicity
+x_cleared = [x0]
+for t in range(T_DAM):
+    x_cleared.append(x_cleared[-1] + delta_t_DAM * (eta_c * dam_cleared_commitments[t][0] - (1/eta_d) * dam_cleared_commitments[t][1]))
+logging.info("DAM commitments finalized and SoC updated")
+
+# -------------------------------
+# 4. RTM Optimization at 22:00
+# -------------------------------
+logging.info("Running RTM optimization at 22:00 based on DAM commitments and updated RTM predictions")
+prob_RTM = pulp.LpProblem("Battery_Arbitrage_RTM", pulp.LpMaximize)
+
+c_RTM = {t: pulp.LpVariable(f"c_RTM_{t}", lowBound=0, cat="Continuous") for t in range(T_RTM)}
+d_RTM = {t: pulp.LpVariable(f"d_RTM_{t}", lowBound=0, cat="Continuous") for t in range(T_RTM)}
+y_RTM = {t: pulp.LpVariable(f"y_RTM_{t}", cat="Binary") for t in range(T_RTM)}
+z_RTM = {t: pulp.LpVariable(f"z_RTM_{t}", cat="Binary") for t in range(T_RTM)}
+x_RTM = {t: pulp.LpVariable(f"x_RTM_{t}", lowBound=0, upBound=E_max, cat="Continuous") for t in range(T_RTM+1)}
+
+prob_RTM += pulp.lpSum([delta_t_RTM * (rtm_prices_pred[t] * d_RTM[t] - rtm_prices_pred[t] * c_RTM[t]) for t in range(T_RTM)])
+prob_RTM += (x_RTM[0] == x_cleared[-1]), "Initial_SoC_RTM"
+for t in range(T_RTM):
+    prob_RTM += (x_RTM[t+1] == x_RTM[t] + delta_t_RTM * (eta_c * c_RTM[t] - (1/eta_d) * d_RTM[t]))
+prob_RTM.solve()
+logging.info("RTM optimization complete")
+
+# -------------------------------
+# 5. Real-time RTM Clearing (Every 30 Minutes)
+# -------------------------------
+x_realtime = [x_cleared[-1]]
+for t in range(T_RTM):
+    logging.info(f"RTM Clearing for Period {t}: Updating SoC")
+    c_actual, d_actual = c_RTM[t].varValue, d_RTM[t].varValue
+    x_realtime.append(x_realtime[-1] + delta_t_RTM * (eta_c * c_actual - (1/eta_d) * d_actual))
+    logging.info(f"SoC after period {t}: {x_realtime[-1]:.2f} MWh")
+logging.info("RTM schedule finalized and SoC updated for the entire day")
