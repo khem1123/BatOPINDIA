@@ -193,4 +193,3 @@ This approach maximizes arbitrage profit while respecting battery operational co
 Feel free to adjust the parameters or constraints to match your specific market conditions or battery characteristics.
 ````markdown
 
-You now have a complete Markdown document that explains all equations, constraints, and code structure with properly wrapped math equations.
